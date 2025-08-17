@@ -56,7 +56,9 @@ def get_messages():
     cur = conn.cursor()
     cur.execute("""
         SELECT id, from_number, to_number, body, media_url, created_at, seen
-        FROM messages ORDER BY created_at DESC LIMIT 20
+        FROM messages
+        WHERE seen = false
+        ORDER BY created_at DESC LIMIT 20
     """)
     rows = cur.fetchall()
     cur.close()
@@ -75,6 +77,17 @@ def get_messages():
         for r in rows
     ]
     return jsonify(messages)
+
+
+@app.route("/messages/<int:message_id>/seen", methods=["POST"])
+def mark_seen(message_id):
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+    cur.execute("UPDATE messages SET seen = true WHERE id = %s;", (message_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"status": "success", "message_id": message_id})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001, debug=True)

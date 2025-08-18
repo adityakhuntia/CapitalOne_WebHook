@@ -114,11 +114,12 @@ def whatsapp_webhook():
         # 3️⃣ User already has language & state → treat as normal query
         elif lang and state:
             # you can plug in your assistant logic here
-            twilio_client.messages.create(
-                from_=WHATSAPP_FROM,
-                to=from_number,
-                body=f"Hi! You’re registered with Language = {lang}, State = {state}. How can I help today?"
-            )
+            #twilio_client.messages.create(
+            #    from_=WHATSAPP_FROM,
+            #    to=from_number,
+            #    body=f"Hi! You’re registered with Language = {lang}, State = {state}. How can I help today?"
+            #)
+            continue
 
     conn.commit()
     cur.close()
@@ -133,10 +134,13 @@ def get_messages():
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
     cur.execute("""
-        SELECT id, from_number, to_number, body, media_url, created_at, seen
-        FROM messages
-        WHERE seen = false
-        ORDER BY created_at DESC LIMIT 20
+        SELECT m.id, m.from_number, m.to_number, m.body, m.media_url, m.created_at, m.seen,
+               u.language, u.state
+        FROM messages m
+        LEFT JOIN users u ON m.from_number = u.phone_number
+        WHERE m.seen = false
+        ORDER BY m.created_at DESC
+        LIMIT 20
     """)
     rows = cur.fetchall()
     cur.close()
@@ -151,6 +155,8 @@ def get_messages():
             "media_url": r[4],
             "created_at": r[5].isoformat(),
             "seen": r[6],
+            "language": r[7],
+            "state": r[8],
         }
         for r in rows
     ]

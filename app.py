@@ -119,7 +119,7 @@ def whatsapp_webhook():
             #    to=from_number,
             #    body=f"Hi! You’re registered with Language = {lang}, State = {state}. How can I help today?"
             #)
-            continue
+            return "OK", 200
 
     conn.commit()
     cur.close()

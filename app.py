@@ -1,10 +1,11 @@
 from flask import Flask, request, jsonify
 from twilio.rest import Client
 import psycopg2, os, json
+from psycopg2 import pool
 
 app = Flask(__name__)
 
-# Read Render Postgres URL + Twilio creds from env
+# Env vars (Render / Local)
 DATABASE_URL = os.getenv("DATABASE_URL")
 TWILIO_SID = os.getenv("TWILIO_SID")
 TWILIO_AUTH = os.getenv("TWILIO_AUTH")
@@ -12,9 +13,21 @@ WHATSAPP_FROM = "whatsapp:+14155238886"  # Twilio sandbox number
 
 twilio_client = Client(TWILIO_SID, TWILIO_AUTH)
 
-# Ensure tables exist
+# Setup Postgres connection pool
+db_pool = pool.SimpleConnectionPool(
+    1, 10, dsn=DATABASE_URL
+)
+
+def get_conn():
+    return db_pool.getconn()
+
+def put_conn(conn):
+    db_pool.putconn(conn)
+
+# Initialize schema
 def init_db():
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = get_conn()
+    conn.autocommit = True
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS messages (
@@ -36,115 +49,100 @@ def init_db():
             joined_at TIMESTAMP DEFAULT NOW()
         )
     """)
-    conn.commit()
     cur.close()
-    conn.close()
+    put_conn(conn)
 
 init_db()
+
 @app.route("/webhook", methods=["POST"])
 def whatsapp_webhook():
     data = request.form.to_dict()
-    print("Incoming data:", data)
+    print("📩 Incoming data:", data)
 
     from_number = data.get("From")
     to_number = data.get("To")
     body = data.get("Body", "").strip()
     media_url = data.get("MediaUrl0") if int(data.get("NumMedia", 0)) > 0 else None
 
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = get_conn()
+    conn.autocommit = True
     cur = conn.cursor()
 
-    # Always store the raw message
-    cur.execute("""
-        INSERT INTO messages (from_number, to_number, body, media_url, raw_data)
-        VALUES (%s, %s, %s, %s, %s)
-    """, (from_number, to_number, body, media_url, json.dumps(data)))
+    try:
+        # Store raw message
+        cur.execute("""
+            INSERT INTO messages (from_number, to_number, body, media_url, raw_data)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (from_number, to_number, body, media_url, json.dumps(data)))
+        print("✅ Saved message to DB:", from_number, body, media_url)
 
-    # Get user if exists
-    cur.execute("SELECT phone_number, language, state FROM users WHERE phone_number = %s;", (from_number,))
-    user = cur.fetchone()
+        # Check if user exists
+        cur.execute("SELECT * FROM users WHERE phone_number = %s;", (from_number,))
+        user = cur.fetchone()
 
-    # 1️⃣ Brand new user → insert & send welcome
-    if not user:
-        cur.execute(
-            "INSERT INTO users (phone_number, language, state) VALUES (%s, %s, %s) "
-            "ON CONFLICT (phone_number) DO NOTHING",
-            (from_number, None, None)
-        )
-        conn.commit()
+        if not user:
+            # New user → insert record + send welcome
+            cur.execute("""
+                INSERT INTO users (phone_number, language, state)
+                VALUES (%s, NULL, NULL)
+                ON CONFLICT (phone_number) DO NOTHING
+            """, (from_number,))
 
-        twilio_client.messages.create(
-            from_=WHATSAPP_FROM,
-            to=from_number,
-            body=(
-                "👋 Welcome! Please choose your preferred *Language* and *State*.\n\n"
-                "Reply in the format:\nLanguage: <Your Language>\nState: <Your State>"
+            twilio_client.messages.create(
+                from_=WHATSAPP_FROM,
+                to=from_number,
+                body=(
+                    "👋 Welcome! Please choose your preferred *Language* and *State*.\n\n"
+                    "Reply in the format:\nLanguage: <Your Language>\nState: <Your State>"
+                )
             )
-        )
+        else:
+            # Existing user → language/state update
+            if "language:" in body.lower() and "state:" in body.lower():
+                try:
+                    parts = body.split("\n")
+                    lang, state = None, None
+                    for p in parts:
+                        if "language" in p.lower():
+                            lang = p.split(":")[1].strip()
+                        if "state" in p.lower():
+                            state = p.split(":")[1].strip()
 
-    else:
-        lang, state = user[1], user[2]
+                    if lang and state:
+                        cur.execute("""
+                            UPDATE users SET language=%s, state=%s WHERE phone_number=%s
+                        """, (lang, state, from_number))
 
-        # 2️⃣ User exists but hasn’t set language/state yet
-        if (not lang or not state) and ("language:" in body.lower() and "state:" in body.lower()):
-            try:
-                parts = body.split("\n")
-                new_lang, new_state = None, None
-                for p in parts:
-                    if "language" in p.lower():
-                        new_lang = p.split(":", 1)[1].strip()
-                    if "state" in p.lower():
-                        new_state = p.split(":", 1)[1].strip()
+                        twilio_client.messages.create(
+                            from_=WHATSAPP_FROM,
+                            to=from_number,
+                            body=f"✅ Got it! Saved Language = {lang}, State = {state}"
+                        )
+                except Exception as e:
+                    print("⚠️ Parse error:", e)
 
-                if new_lang and new_state:
-                    cur.execute(
-                        "UPDATE users SET language=%s, state=%s WHERE phone_number=%s",
-                        (new_lang, new_state, from_number)
-                    )
-                    conn.commit()
+    except Exception as e:
+        print("❌ DB Insert error:", e)
 
-                    twilio_client.messages.create(
-                        from_=WHATSAPP_FROM,
-                        to=from_number,
-                        body=f"✅ Got it! Saved Language = {new_lang}, State = {new_state}"
-                    )
-            except Exception as e:
-                print("Parse error:", e)
-
-        # 3️⃣ User already has language & state → treat as normal query
-        elif lang and state:
-            # you can plug in your assistant logic here
-            #twilio_client.messages.create(
-            #    from_=WHATSAPP_FROM,
-            #    to=from_number,
-            #    body=f"Hi! You’re registered with Language = {lang}, State = {state}. How can I help today?"
-            #)
-            return "OK", 200
-
-    conn.commit()
-    cur.close()
-    conn.close()
+    finally:
+        cur.close()
+        put_conn(conn)
 
     return "OK", 200
 
-
-
 @app.route("/messages", methods=["GET"])
 def get_messages():
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT m.id, m.from_number, m.to_number, m.body, m.media_url, m.created_at, m.seen,
-               u.language, u.state
-        FROM messages m
-        LEFT JOIN users u ON m.from_number = u.phone_number
-        WHERE m.seen = false
-        ORDER BY m.created_at DESC
-        LIMIT 20
+        SELECT id, from_number, to_number, body, media_url, created_at, seen
+        FROM messages
+        WHERE seen = false
+        ORDER BY created_at DESC LIMIT 20
     """)
     rows = cur.fetchall()
     cur.close()
-    conn.close()
+    put_conn(conn)
 
     messages = [
         {
@@ -155,22 +153,19 @@ def get_messages():
             "media_url": r[4],
             "created_at": r[5].isoformat(),
             "seen": r[6],
-            "language": r[7],
-            "state": r[8],
         }
         for r in rows
     ]
     return jsonify(messages)
 
-
 @app.route("/messages/<int:message_id>/seen", methods=["POST"])
 def mark_seen(message_id):
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = get_conn()
+    conn.autocommit = True
     cur = conn.cursor()
     cur.execute("UPDATE messages SET seen = true WHERE id = %s;", (message_id,))
-    conn.commit()
     cur.close()
-    conn.close()
+    put_conn(conn)
     return jsonify({"status": "success", "message_id": message_id})
 
 if __name__ == "__main__":

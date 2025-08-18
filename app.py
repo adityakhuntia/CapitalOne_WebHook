@@ -41,7 +41,6 @@ def init_db():
     conn.close()
 
 init_db()
-
 @app.route("/webhook", methods=["POST"])
 def whatsapp_webhook():
     data = request.form.to_dict()
@@ -55,18 +54,25 @@ def whatsapp_webhook():
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
 
-    # Store raw message
+    # Always store the raw message
     cur.execute("""
         INSERT INTO messages (from_number, to_number, body, media_url, raw_data)
         VALUES (%s, %s, %s, %s, %s)
     """, (from_number, to_number, body, media_url, json.dumps(data)))
 
-    # Check if user already exists
-    cur.execute("SELECT * FROM users WHERE phone_number = %s;", (from_number,))
+    # Get user if exists
+    cur.execute("SELECT phone_number, language, state FROM users WHERE phone_number = %s;", (from_number,))
     user = cur.fetchone()
 
+    # 1️⃣ Brand new user → insert & send welcome
     if not user:
-        # New user → send template message
+        cur.execute(
+            "INSERT INTO users (phone_number, language, state) VALUES (%s, %s, %s) "
+            "ON CONFLICT (phone_number) DO NOTHING",
+            (from_number, None, None)
+        )
+        conn.commit()
+
         twilio_client.messages.create(
             from_=WHATSAPP_FROM,
             to=from_number,
@@ -75,39 +81,51 @@ def whatsapp_webhook():
                 "Reply in the format:\nLanguage: <Your Language>\nState: <Your State>"
             )
         )
+
     else:
-        # Existing user → check if they’re sending language/state update
-        if "language:" in body.lower() and "state:" in body.lower():
+        lang, state = user[1], user[2]
+
+        # 2️⃣ User exists but hasn’t set language/state yet
+        if (not lang or not state) and ("language:" in body.lower() and "state:" in body.lower()):
             try:
-                # Simple parsing
                 parts = body.split("\n")
-                lang = None
-                state = None
+                new_lang, new_state = None, None
                 for p in parts:
                     if "language" in p.lower():
-                        lang = p.split(":")[1].strip()
+                        new_lang = p.split(":", 1)[1].strip()
                     if "state" in p.lower():
-                        state = p.split(":")[1].strip()
+                        new_state = p.split(":", 1)[1].strip()
 
-                if lang and state:
-                    cur.execute("""
-                        UPDATE users SET language=%s, state=%s WHERE phone_number=%s
-                    """, (lang, state, from_number))
+                if new_lang and new_state:
+                    cur.execute(
+                        "UPDATE users SET language=%s, state=%s WHERE phone_number=%s",
+                        (new_lang, new_state, from_number)
+                    )
                     conn.commit()
 
                     twilio_client.messages.create(
                         from_=WHATSAPP_FROM,
                         to=from_number,
-                        body=f"✅ Got it! Saved Language = {lang}, State = {state}"
+                        body=f"✅ Got it! Saved Language = {new_lang}, State = {new_state}"
                     )
             except Exception as e:
                 print("Parse error:", e)
+
+        # 3️⃣ User already has language & state → treat as normal query
+        elif lang and state:
+            # you can plug in your assistant logic here
+            twilio_client.messages.create(
+                from_=WHATSAPP_FROM,
+                to=from_number,
+                body=f"Hi! You’re registered with Language = {lang}, State = {state}. How can I help today?"
+            )
 
     conn.commit()
     cur.close()
     conn.close()
 
     return "OK", 200
+
 
 
 @app.route("/messages", methods=["GET"])

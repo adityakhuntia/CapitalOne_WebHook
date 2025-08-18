@@ -1,12 +1,18 @@
 from flask import Flask, request, jsonify
+from twilio.rest import Client
 import psycopg2, os, json
 
 app = Flask(__name__)
 
-# Read Render Postgres URL from env
+# Read Render Postgres URL + Twilio creds from env
 DATABASE_URL = os.getenv("DATABASE_URL")
+TWILIO_SID = os.getenv("TWILIO_SID")
+TWILIO_AUTH = os.getenv("TWILIO_AUTH")
+WHATSAPP_FROM = "whatsapp:+14155238886"  # Twilio sandbox number
 
-# Ensure table exists
+twilio_client = Client(TWILIO_SID, TWILIO_AUTH)
+
+# Ensure tables exist
 def init_db():
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
@@ -22,6 +28,14 @@ def init_db():
             seen BOOL DEFAULT FALSE
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            phone_number TEXT PRIMARY KEY,
+            language TEXT,
+            state TEXT,
+            joined_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
     conn.commit()
     cur.close()
     conn.close()
@@ -35,20 +49,66 @@ def whatsapp_webhook():
 
     from_number = data.get("From")
     to_number = data.get("To")
-    body = data.get("Body", "")
+    body = data.get("Body", "").strip()
     media_url = data.get("MediaUrl0") if int(data.get("NumMedia", 0)) > 0 else None
 
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
+
+    # Store raw message
     cur.execute("""
         INSERT INTO messages (from_number, to_number, body, media_url, raw_data)
         VALUES (%s, %s, %s, %s, %s)
     """, (from_number, to_number, body, media_url, json.dumps(data)))
+
+    # Check if user already exists
+    cur.execute("SELECT * FROM users WHERE phone_number = %s;", (from_number,))
+    user = cur.fetchone()
+
+    if not user:
+        # New user → send template message
+        twilio_client.messages.create(
+            from_=WHATSAPP_FROM,
+            to=from_number,
+            body=(
+                "👋 Welcome! Please choose your preferred *Language* and *State*.\n\n"
+                "Reply in the format:\nLanguage: <Your Language>\nState: <Your State>"
+            )
+        )
+    else:
+        # Existing user → check if they’re sending language/state update
+        if "language:" in body.lower() and "state:" in body.lower():
+            try:
+                # Simple parsing
+                parts = body.split("\n")
+                lang = None
+                state = None
+                for p in parts:
+                    if "language" in p.lower():
+                        lang = p.split(":")[1].strip()
+                    if "state" in p.lower():
+                        state = p.split(":")[1].strip()
+
+                if lang and state:
+                    cur.execute("""
+                        UPDATE users SET language=%s, state=%s WHERE phone_number=%s
+                    """, (lang, state, from_number))
+                    conn.commit()
+
+                    twilio_client.messages.create(
+                        from_=WHATSAPP_FROM,
+                        to=from_number,
+                        body=f"✅ Got it! Saved Language = {lang}, State = {state}"
+                    )
+            except Exception as e:
+                print("Parse error:", e)
+
     conn.commit()
     cur.close()
     conn.close()
 
     return "OK", 200
+
 
 @app.route("/messages", methods=["GET"])
 def get_messages():

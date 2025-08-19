@@ -184,3 +184,11 @@ def mark_seen(message_id):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001, debug=True)
+
+
+@app.route("/audio/<filename>")
+def serve_audio(filename):
+    path = f"/tmp/{filename}"
+    if os.path.exists(path):
+        return send_file(path, mimetype="audio/ogg")
+    return "File not found", 404

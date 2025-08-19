@@ -54,6 +54,9 @@ def init_db():
 
 init_db()
 
+
+
+
 @app.route("/webhook", methods=["POST"])
 def whatsapp_webhook():
     data = request.form.to_dict()
@@ -130,15 +133,21 @@ def whatsapp_webhook():
 
     return "OK", 200
 
+
+
+
+
 @app.route("/messages", methods=["GET"])
 def get_messages():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT id, from_number, to_number, body, media_url, created_at, seen
-        FROM messages
-        WHERE seen = false
-        ORDER BY created_at DESC LIMIT 20
+        SELECT m.id, m.from_number, m.to_number, m.body, m.media_url, m.created_at, m.seen,
+               u.language, u.state
+        FROM messages m
+        LEFT JOIN users u ON m.from_number = u.phone_number
+        WHERE m.seen = false
+        ORDER BY m.created_at DESC LIMIT 20
     """)
     rows = cur.fetchall()
     cur.close()
@@ -153,10 +162,15 @@ def get_messages():
             "media_url": r[4],
             "created_at": r[5].isoformat(),
             "seen": r[6],
+            "language": r[7],
+            "state": r[8],
         }
         for r in rows
     ]
     return jsonify(messages)
+
+
+
 
 @app.route("/messages/<int:message_id>/seen", methods=["POST"])
 def mark_seen(message_id):

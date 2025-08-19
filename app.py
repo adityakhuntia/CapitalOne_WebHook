@@ -183,13 +183,20 @@ def mark_seen(message_id):
     put_conn(conn)
     return jsonify({"status": "success", "message_id": message_id})
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001, debug=True)
 
 
+
+
+
+AUDIO_FOLDER = "audio"
+os.makedirs(AUDIO_FOLDER, exist_ok=True)
 @app.route("/audio/<filename>")
 def serve_audio(filename):
-    path = f"/tmp/{filename}"
-    if os.path.exists(path):
-        return send_file(path, mimetype="audio/ogg")
+    file_path = os.path.join(AUDIO_FOLDER, filename)
+    if os.path.exists(file_path):
+        return send_file(file_path, mimetype="audio/ogg")
     return "File not found", 404
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5001, debug=True)
